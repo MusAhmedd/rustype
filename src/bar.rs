@@ -6,6 +6,7 @@ use crate::export;
 use crate::settings::{ExportFormat, Settings, SoundPack, TypeFont};
 use crate::tags::{self, Tags};
 use crate::theme;
+use crate::update::{self, Status};
 use std::path::Path;
 use eframe::egui::{
     self, epaint::Shadow, pos2, vec2, Align2, Color32, FontId, Frame, Id, Margin, Order, Rect, RichText, Sense, Stroke, Vec2,
@@ -37,6 +38,7 @@ pub enum Popup {
     Emoji,
     Export,
     Tag,
+    About,
 }
 
 #[derive(Default)]
@@ -56,6 +58,9 @@ pub enum Action {
     Export(ExportFormat, String),
     CopyText,
     CopyImage,
+    CheckUpdate,
+    InstallUpdate,
+    OpenUrl(String),
 }
 
 fn panel_frame() -> Frame {
@@ -74,6 +79,7 @@ pub fn show(
     editor_title: Option<&str>,
     sheet: Option<&Path>,
     tags: &mut Tags,
+    upd: &Status,
     now: f64,
 ) -> Option<Action> {
     let in_editor = editor_title.is_some();
@@ -141,6 +147,18 @@ pub fn show(
                         toggle_popup(Popup::Light, st);
                     }
 
+                    let has_update = matches!(upd, Status::Available(_) | Status::Downloading(..));
+                    let r = icons::icon_button(ui, size, st.popup == Some(Popup::About), |p, r, c| {
+                        icons::info(p, r, c);
+                        if has_update {
+                            p.circle_filled(pos2(r.right() + 1.0, r.top() + 1.0), 4.0, theme::accent());
+                        }
+                    });
+                    let tip = if has_update { "About & updates \u{00b7} update available" } else { "About & updates" };
+                    if r.on_hover_text(tip).clicked() {
+                        toggle_popup(Popup::About, st);
+                    }
+
                     if in_editor {
                         let (sep, _) = ui.allocate_exact_size(vec2(9.0, BTN), Sense::hover());
                         ui.painter().line_segment(
@@ -202,6 +220,11 @@ pub fn show(
                     }
                     Popup::Export => {
                         if let Some(a) = export_popup(ui, s, st) {
+                            action = Some(a);
+                        }
+                    }
+                    Popup::About => {
+                        if let Some(a) = about_popup(ui, s, upd) {
                             action = Some(a);
                         }
                     }
@@ -414,6 +437,117 @@ fn export_popup(ui: &mut egui::Ui, s: &mut Settings, st: &mut State) -> Option<A
         ui.add_space(8.0);
         let col = if *err { Color32::from_rgb(220, 90, 80) } else { theme::muted() };
         ui.add(egui::Label::new(RichText::new(msg.as_str()).size(12.0).color(col)).wrap());
+    }
+    out
+}
+
+fn about_popup(ui: &mut egui::Ui, s: &mut Settings, upd: &Status) -> Option<Action> {
+    let mut out = None;
+    ui.set_width(300.0);
+    heading(ui, "ABOUT & UPDATES");
+    ui.label(RichText::new(format!("Rustype {}", update::CURRENT)).size(16.0).color(theme::text()));
+    ui.add_space(8.0);
+
+    let primary = |ui: &mut egui::Ui, label: &str| {
+        ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE).strong()).fill(theme::accent()).rounding(8.0).min_size(vec2(0.0, 30.0)))
+            .clicked()
+    };
+    let plain = |ui: &mut egui::Ui, label: &str| ui.add(egui::Button::new(label).rounding(8.0).min_size(vec2(0.0, 30.0))).clicked();
+    let note = |ui: &mut egui::Ui, msg: &str, err: bool| {
+        let col = if err { Color32::from_rgb(220, 90, 80) } else { theme::muted() };
+        ui.add(egui::Label::new(RichText::new(msg).size(12.5).color(col)).wrap());
+    };
+
+    match upd {
+        Status::Idle => {
+            if plain(ui, "Check for updates") {
+                out = Some(Action::CheckUpdate);
+            }
+        }
+        Status::Checking => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                note(ui, "Checking GitHub\u{2026}", false);
+            });
+        }
+        Status::UpToDate => {
+            note(ui, "You have the latest version.", false);
+            ui.add_space(4.0);
+            if plain(ui, "Check again") {
+                out = Some(Action::CheckUpdate);
+            }
+        }
+        Status::Available(rel) => {
+            note(ui, &format!("Version {} is available.", rel.version), false);
+            let summary = notes_preview(&rel.notes);
+            if !summary.is_empty() {
+                ui.add_space(4.0);
+                Frame::none().fill(theme::card()).rounding(8.0).inner_margin(Margin::same(10.0)).show(ui, |ui| {
+                    ui.set_width(280.0);
+                    ui.add(egui::Label::new(RichText::new(summary).size(12.0).color(theme::muted())).wrap());
+                });
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if primary(ui, &format!("Update to {}", rel.version)) {
+                    out = Some(Action::InstallUpdate);
+                }
+                if plain(ui, "Release notes") {
+                    out = Some(Action::OpenUrl(rel.page.clone()));
+                }
+            });
+            note(ui, "Your sheets are saved and Rustype restarts on its own.", false);
+        }
+        Status::Downloading(rel, got, total) => {
+            note(ui, &format!("Downloading {}\u{2026}", rel.version), false);
+            let frac = if *total > 0 { *got as f32 / *total as f32 } else { 0.0 };
+            ui.add(egui::ProgressBar::new(frac).desired_width(280.0).show_percentage());
+        }
+        Status::Installed => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                note(ui, "Installed. Restarting\u{2026}", false);
+            });
+        }
+        Status::Failed(e) => {
+            note(ui, e, true);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if plain(ui, "Try again") {
+                    out = Some(Action::CheckUpdate);
+                }
+                if plain(ui, "Open releases") {
+                    out = Some(Action::OpenUrl("https://github.com/MusAhmedd/rustype/releases".into()));
+                }
+            });
+        }
+    }
+
+    ui.add_space(8.0);
+    ui.separator();
+    icons::toggle(ui, &mut s.auto_update_check, "Check automatically at launch");
+    out
+}
+
+/// First lines of the release notes as plain text, about 240 chars at most.
+fn notes_preview(notes: &str) -> String {
+    let plain: Vec<String> = notes
+        .lines()
+        .map(|l| l.trim().trim_start_matches(['-', '*', ' ']).replace("**", "").replace('`', ""))
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    let mut out = String::new();
+    for l in plain {
+        if out.chars().count() + l.chars().count() > 240 {
+            if out.is_empty() {
+                out = l.chars().take(237).collect::<String>() + "\u{2026}";
+            }
+            break;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&l);
     }
     out
 }

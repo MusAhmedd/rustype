@@ -13,6 +13,7 @@ mod settings;
 mod sound;
 mod tags;
 mod theme;
+mod update;
 
 use eframe::egui::{self, vec2, Align2, Color32, Frame, Id, Margin, Order, RichText, Sense};
 use settings::Settings;
@@ -98,10 +99,15 @@ struct App {
     caret_epoch: f64,
     /// A mouse selection is in progress on the sheet.
     selecting: bool,
+    updater: update::Updater,
+    /// The launch-time update check has been considered.
+    launch_checked: bool,
+    restarting: bool,
 }
 
 impl App {
     fn new() -> Self {
+        update::cleanup_old();
         let store = notes::Store::open_default();
         let tags = tags::Tags::load(store.tags_path());
         let settings = Settings::load(&store.settings_path());
@@ -127,6 +133,9 @@ impl App {
             overtype: false,
             caret_epoch: 0.0,
             selecting: false,
+            updater: update::Updater::default(),
+            launch_checked: false,
+            restarting: false,
         }
     }
 
@@ -527,6 +536,27 @@ impl App {
         }
     }
 
+    /// Launch-time update check, and restarting once an update is in place.
+    fn updates(&mut self, ctx: &egui::Context) {
+        if !self.launch_checked {
+            self.launch_checked = true;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            if self.settings.auto_update_check && now.saturating_sub(self.settings.last_update_check) >= 24 * 3600 {
+                self.settings.last_update_check = now;
+                self.updater.check(ctx);
+            }
+        }
+        if !self.restarting && matches!(self.updater.status(), update::Status::Installed) {
+            self.restarting = true;
+            for t in &mut self.tabs {
+                t.save_now();
+            }
+            self.persist_settings();
+            update::relaunch();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     fn card_look(&self) -> home::Look {
         let p = self.settings.paper;
         let dark = (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) < 110.0;
@@ -542,6 +572,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.now = ctx.input(|i| i.time);
         let on_edge = chrome::handle_resize(ctx);
+        self.updates(ctx);
         self.shortcuts(ctx);
         self.handle_typing(ctx);
         self.autosave(ctx);
@@ -591,7 +622,8 @@ impl eframe::App for App {
 
         let editor_title = self.active.map(|i| notes::title_of(&self.tabs[i].text));
         let sheet = self.active.map(|i| self.tabs[i].path.clone());
-        match bar::show(ctx, &mut self.settings, &mut self.bar, editor_title.as_deref(), sheet.as_deref(), &mut self.tags, self.now) {
+        let upd_status = self.updater.status();
+        match bar::show(ctx, &mut self.settings, &mut self.bar, editor_title.as_deref(), sheet.as_deref(), &mut self.tags, &upd_status, self.now) {
             Some(bar::Action::Export(format, name)) => {
                 if let Some(i) = self.active {
                     self.bar.export_status = Some(self.export_to_file(frame, i, format, &name));
@@ -611,6 +643,9 @@ impl eframe::App for App {
                     });
                 }
             }
+            Some(bar::Action::CheckUpdate) => self.updater.check(ctx),
+            Some(bar::Action::InstallUpdate) => self.updater.install(ctx),
+            Some(bar::Action::OpenUrl(u)) => update::open_url(&u),
             Some(bar::Action::Insert(e)) => {
                 if let Some(i) = self.active {
                     for ch in e.chars() {

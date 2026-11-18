@@ -210,3 +210,10 @@ pub fn arrow(p: &Painter, r: Rect, c: Color32, up: bool) {
     p.line_segment([at(r, 0.28, back), at(r, 0.5, tip)], stroke(c));
     p.line_segment([at(r, 0.72, back), at(r, 0.5, tip)], stroke(c));
 }
+
+/// Circled "i".
+pub fn info(p: &Painter, r: Rect, c: Color32) {
+    p.circle_stroke(r.center(), r.width() * 0.42, Stroke::new(1.5f32, c));
+    p.circle_filled(at(r, 0.5, 0.31), 1.4, c);
+    p.line_segment([at(r, 0.5, 0.44), at(r, 0.5, 0.72)], Stroke::new(1.8f32, c));
+}

@@ -142,6 +142,9 @@ pub struct Settings {
     pub sort_by: SortBy,
     /// Newest / Z-A / biggest first.
     pub sort_desc: bool,
+    pub auto_update_check: bool,
+    /// Unix seconds of the last automatic update check.
+    pub last_update_check: u64,
 }
 
 impl Default for Settings {
@@ -161,6 +164,8 @@ impl Default for Settings {
             home_view: HomeView::Grid,
             sort_by: SortBy::Edited,
             sort_desc: true,
+            auto_update_check: true,
+            last_update_check: 0,
         }
     }
 }
