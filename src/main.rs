@@ -5,6 +5,7 @@ mod bar;
 mod chrome;
 mod editor;
 mod export;
+mod goal;
 mod home;
 mod icons;
 mod notes;
@@ -48,12 +49,14 @@ struct Tab {
     text: String,
     dirty_since: Option<Instant>,
     ed: editor::State,
+    /// Word count after the last edit, to measure what each edit adds.
+    words: usize,
 }
 
 impl Tab {
     fn open(path: PathBuf) -> Self {
         let text = notes::load(&path);
-        Self { ed: editor::State::new(&text), path, text, dirty_since: None }
+        Self { ed: editor::State::new(&text), words: goal::words(&text), path, text, dirty_since: None }
     }
 
     fn save_now(&mut self) {
@@ -103,6 +106,9 @@ struct App {
     /// The launch-time update check has been considered.
     launch_checked: bool,
     restarting: bool,
+    session: goal::Session,
+    /// Net words typed today; copied into settings when sheets save.
+    today_words: i64,
 }
 
 impl App {
@@ -136,6 +142,43 @@ impl App {
             updater: update::Updater::default(),
             launch_checked: false,
             restarting: false,
+            session: goal::Session::default(),
+            today_words: 0,
+        }
+        .with_today()
+    }
+
+    fn with_today(mut self) -> Self {
+        self.today_words = self.settings.words_today;
+        self.roll_day();
+        self
+    }
+
+    /// Starts a fresh count when the local date changes.
+    fn roll_day(&mut self) {
+        let d = goal::today();
+        if d != self.settings.goal_day {
+            self.settings.goal_day = d;
+            self.settings.words_today = 0;
+            self.today_words = 0;
+        }
+    }
+
+    fn sync_words(&mut self) {
+        self.settings.words_today = self.today_words;
+    }
+
+    /// Adds typed words to today's count and rings once the goal is met.
+    fn count_typing(&mut self, delta: i64) {
+        self.roll_day();
+        self.session.keystroke(self.now);
+        self.session.words += delta;
+        self.today_words = (self.today_words + delta).max(0);
+        let s = &self.settings;
+        if s.goal_on && self.today_words >= s.goal_words as i64 && s.goal_hit_day != s.goal_day {
+            self.settings.goal_hit_day = self.settings.goal_day;
+            self.session.reached_at = Some(self.now);
+            self.play(sound::Effect::Goal);
         }
     }
 
@@ -148,7 +191,7 @@ impl App {
     }
 
     fn new_tab(&mut self) {
-        self.tabs.push(Tab { path: self.store.new_path(), text: String::new(), dirty_since: None, ed: editor::State::new("") });
+        self.tabs.push(Tab { path: self.store.new_path(), text: String::new(), dirty_since: None, ed: editor::State::new(""), words: 0 });
         self.active = Some(self.tabs.len() - 1);
     }
 
@@ -204,7 +247,7 @@ impl App {
                     let tab = &mut self.tabs[i];
                     if let Some(s) = tab.ed.cut(&mut tab.text, self.now) {
                         ctx.copy_text(s);
-                        self.edited(i);
+                        self.edited(i, false);
                         self.play(sound::Effect::Key);
                     }
                 }
@@ -215,10 +258,16 @@ impl App {
     }
 
     /// Marks a tab changed and wakes the caret.
-    fn edited(&mut self, i: usize) {
+    /// `typed` edits (keys, not paste/undo/cut) count toward the goal.
+    fn edited(&mut self, i: usize, typed: bool) {
         self.tabs[i].dirty_since = Some(Instant::now());
         self.bar.last_typed = self.now;
         self.caret_epoch = self.now;
+        let w = goal::words(&self.tabs[i].text);
+        let delta = w as i64 - std::mem::replace(&mut self.tabs[i].words, w) as i64;
+        if typed {
+            self.count_typing(delta);
+        }
     }
 
     fn key(&mut self, i: usize, key: egui::Key, m: egui::Modifiers) {
@@ -251,13 +300,13 @@ impl App {
             }
             Key::Backspace => {
                 if tab.ed.backspace(&mut tab.text, m.command, now) {
-                    self.edited(i);
+                    self.edited(i, true);
                     self.play(sound::Effect::Key);
                 }
             }
             Key::Delete => {
                 if tab.ed.delete(&mut tab.text, m.command, now) {
-                    self.edited(i);
+                    self.edited(i, true);
                     self.play(sound::Effect::Key);
                 }
             }
@@ -271,17 +320,17 @@ impl App {
             }
             Key::Z if m.command && m.shift => {
                 if tab.ed.redo(&mut tab.text) {
-                    self.edited(i);
+                    self.edited(i, false);
                 }
             }
             Key::Z if m.command => {
                 if tab.ed.undo(&mut tab.text) {
-                    self.edited(i);
+                    self.edited(i, false);
                 }
             }
             Key::Y if m.command => {
                 if tab.ed.redo(&mut tab.text) {
-                    self.edited(i);
+                    self.edited(i, false);
                 }
             }
             _ => {}
@@ -296,7 +345,7 @@ impl App {
         }
         let tab = &mut self.tabs[i];
         tab.ed.insert(&mut tab.text, &clean, false, self.now);
-        self.edited(i);
+        self.edited(i, false);
         self.play(sound::Effect::Return);
     }
 
@@ -307,7 +356,7 @@ impl App {
         let line_before = editor::line_col(&editor::layout(&editor::chars(&tab.text)), tab.ed.cursor).0;
         tab.ed.insert(&mut tab.text, ch.encode_utf8(&mut [0; 4]), overtype, now);
         let (line, col) = editor::line_col(&editor::layout(&editor::chars(&tab.text)), tab.ed.cursor);
-        self.edited(i);
+        self.edited(i, true);
         if !ch.is_whitespace() {
             self.last_strike = Some((now, ch));
         }
@@ -343,6 +392,7 @@ impl App {
             overtype: self.overtype,
             selection: tab.ed.selection(),
             scroll: tab.ed.scroll,
+            glow: self.session.celebration(now),
         };
         let strike = self.last_strike.map(|(t, ch)| paper::Strike { age: (now - t) as f32, ch });
         let sheet = paper::draw(ui, &view, &self.settings, strike);
@@ -431,15 +481,20 @@ impl App {
     }
 
     fn autosave(&mut self, ctx: &egui::Context) {
+        let mut saved = false;
         for t in &mut self.tabs {
             if let Some(since) = t.dirty_since {
                 if since.elapsed() >= AUTOSAVE_DELAY {
                     t.save_now();
                     self.notes_stale = true;
+                    saved = true;
                 } else {
                     ctx.request_repaint_after(AUTOSAVE_DELAY);
                 }
             }
+        }
+        if saved {
+            self.sync_words();
         }
     }
 
@@ -551,10 +606,36 @@ impl App {
             for t in &mut self.tabs {
                 t.save_now();
             }
+            self.sync_words();
             self.persist_settings();
             update::relaunch();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+
+    /// Short "goal reached" banner at the top of the sheet.
+    fn goal_banner(&self, ctx: &egui::Context) {
+        let t = self.session.celebration(self.now);
+        if t <= 0.0 {
+            return;
+        }
+        ctx.request_repaint();
+        egui::Area::new(Id::new("goal_banner"))
+            .order(Order::Foreground)
+            .interactable(false)
+            .anchor(Align2::CENTER_TOP, [0.0, 58.0 - 10.0 * (1.0 - t)])
+            .show(ctx, |ui| {
+                ui.multiply_opacity(t);
+                Frame::none()
+                    .fill(theme::bar())
+                    .stroke(egui::Stroke::new(1.5f32, theme::accent()))
+                    .rounding(18.0)
+                    .inner_margin(Margin::symmetric(18.0, 9.0))
+                    .show(ui, |ui| {
+                        let msg = format!("Goal reached \u{00b7} {} today", goal::n_words(self.today_words));
+                        ui.label(RichText::new(msg).size(14.5).strong().color(theme::text()));
+                    });
+            });
     }
 
     fn card_look(&self) -> home::Look {
@@ -576,6 +657,7 @@ impl eframe::App for App {
         self.shortcuts(ctx);
         self.handle_typing(ctx);
         self.autosave(ctx);
+        self.roll_day();
 
         let low = self.settings.light_on;
         if low != self.low_light_applied {
@@ -602,6 +684,7 @@ impl eframe::App for App {
         match self.active {
             Some(i) => {
                 egui::CentralPanel::default().frame(Frame::none()).show(ctx, |ui| self.editor_view(ui, i));
+                self.goal_banner(ctx);
             }
             None => {
                 let look = self.card_look();
@@ -623,7 +706,19 @@ impl eframe::App for App {
         let editor_title = self.active.map(|i| notes::title_of(&self.tabs[i].text));
         let sheet = self.active.map(|i| self.tabs[i].path.clone());
         let upd_status = self.updater.status();
-        match bar::show(ctx, &mut self.settings, &mut self.bar, editor_title.as_deref(), sheet.as_deref(), &mut self.tags, &upd_status, self.now) {
+        let stats = self.active.map(|i| bar::Stats {
+            sheet_words: self.tabs[i].words,
+            sheet_chars: goal::chars(&self.tabs[i].text),
+            today: self.today_words,
+            session_words: self.session.words,
+            session_secs: self.session.active_secs,
+        });
+        match bar::show(ctx, &mut self.settings, &mut self.bar, editor_title.as_deref(), sheet.as_deref(), &mut self.tags, &upd_status, stats.as_ref(), self.now) {
+            Some(bar::Action::ResetToday) => {
+                self.today_words = 0;
+                self.settings.goal_hit_day = 0;
+                self.sync_words();
+            }
             Some(bar::Action::Export(format, name)) => {
                 if let Some(i) = self.active {
                     self.bar.export_status = Some(self.export_to_file(frame, i, format, &name));
@@ -675,6 +770,7 @@ impl eframe::App for App {
         for t in &mut self.tabs {
             t.save_now();
         }
+        self.sync_words();
         self.persist_settings();
     }
 }

@@ -39,6 +39,16 @@ pub enum Popup {
     Export,
     Tag,
     About,
+    Goal,
+}
+
+/// Word counts for the open sheet, shown by the goal button.
+pub struct Stats {
+    pub sheet_words: usize,
+    pub sheet_chars: usize,
+    pub today: i64,
+    pub session_words: i64,
+    pub session_secs: f64,
 }
 
 #[derive(Default)]
@@ -61,6 +71,7 @@ pub enum Action {
     CheckUpdate,
     InstallUpdate,
     OpenUrl(String),
+    ResetToday,
 }
 
 fn panel_frame() -> Frame {
@@ -80,11 +91,12 @@ pub fn show(
     sheet: Option<&Path>,
     tags: &mut Tags,
     upd: &Status,
+    stats: Option<&Stats>,
     now: f64,
 ) -> Option<Action> {
     let in_editor = editor_title.is_some();
     let mut action = None;
-    if !in_editor && matches!(st.popup, Some(Popup::Emoji | Popup::Export | Popup::Tag)) {
+    if !in_editor && matches!(st.popup, Some(Popup::Emoji | Popup::Export | Popup::Tag | Popup::Goal)) {
         st.popup = None;
     }
 
@@ -182,6 +194,17 @@ pub fn show(
                         if r.on_hover_text(tip).clicked() {
                             toggle_popup(Popup::Tag, st);
                         }
+                        if let Some(stats) = stats {
+                            let r = goal_button(ui, s, stats, st.popup == Some(Popup::Goal));
+                            let tip = if s.goal_on {
+                                format!("{} / {} words today", stats.today, s.goal_words)
+                            } else {
+                                "Word count & goal".to_string()
+                            };
+                            if r.on_hover_text(tip).clicked() {
+                                toggle_popup(Popup::Goal, st);
+                            }
+                        }
                         let r = icons::icon_button(ui, size, st.popup == Some(Popup::Export), icons::export);
                         if r.on_hover_text("Export").clicked() {
                             toggle_popup(Popup::Export, st);
@@ -226,6 +249,13 @@ pub fn show(
                     Popup::About => {
                         if let Some(a) = about_popup(ui, s, upd) {
                             action = Some(a);
+                        }
+                    }
+                    Popup::Goal => {
+                        if let Some(stats) = stats {
+                            if goal_popup(ui, s, stats) {
+                                action = Some(Action::ResetToday);
+                            }
                         }
                     }
                     Popup::Tag => {
@@ -339,6 +369,91 @@ fn light_popup(ui: &mut egui::Ui, s: &mut Settings) {
             ui.add(egui::Slider::new(&mut s.light_strength, 0.2..=1.0).show_value(false).trailing_fill(true));
         });
     });
+}
+
+/// Pill with a progress ring (when a goal is set) and the sheet's word count.
+fn goal_button(ui: &mut egui::Ui, s: &Settings, stats: &Stats, active: bool) -> egui::Response {
+    let label = short_count(stats.sheet_words);
+    let w = (BTN + label.len() as f32 * 7.5).max(BTN + 14.0);
+    icons::icon_button(ui, vec2(w, BTN), active, |p, r, c| {
+        let ring = pos2(r.center().x - w / 2.0 + BTN / 2.0 - 2.0, r.center().y);
+        let rad = 8.0;
+        p.circle_stroke(ring, rad, Stroke::new(2.0f32, c.gamma_multiply(0.35)));
+        if s.goal_on && s.goal_words > 0 {
+            let frac = (stats.today as f32 / s.goal_words as f32).clamp(0.0, 1.0);
+            if frac >= 1.0 {
+                p.circle_stroke(ring, rad, Stroke::new(2.0f32, theme::accent()));
+                p.circle_filled(ring, 3.0, theme::accent());
+            } else if frac > 0.0 {
+                let n = (frac * 40.0).ceil() as usize + 1;
+                let pts: Vec<_> = (0..n)
+                    .map(|k| {
+                        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * frac * k as f32 / (n - 1) as f32;
+                        ring + vec2(a.cos(), a.sin()) * rad
+                    })
+                    .collect();
+                p.add(egui::Shape::line(pts, Stroke::new(2.0f32, theme::accent())));
+            }
+        } else {
+            p.text(ring, Align2::CENTER_CENTER, "#", FontId::proportional(11.0), c);
+        }
+        p.text(pos2(ring.x + rad + 7.0, ring.y), Align2::LEFT_CENTER, label, FontId::proportional(13.5), c);
+    })
+}
+
+/// 1234 -> "1.2k" so the button stays narrow.
+fn short_count(n: usize) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else if n < 100_000 {
+        format!("{:.1}k", n as f32 / 1000.0)
+    } else {
+        format!("{}k", n / 1000)
+    }
+}
+
+/// Returns true when "Reset today" was clicked.
+fn goal_popup(ui: &mut egui::Ui, s: &mut Settings, stats: &Stats) -> bool {
+    ui.set_width(280.0);
+    heading(ui, "WRITING");
+    let row = |ui: &mut egui::Ui, k: &str, v: String| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(k).color(theme::muted()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(v).color(theme::text()));
+            });
+        });
+    };
+    use crate::goal::{duration, n_words};
+    row(ui, "This sheet", format!("{} \u{00b7} {} chars", n_words(stats.sheet_words as i64), stats.sheet_chars));
+    row(ui, "This session", format!("{} \u{00b7} {}", n_words(stats.session_words.max(0)), duration(stats.session_secs)));
+    row(ui, "Today", n_words(stats.today));
+
+    ui.add_space(8.0);
+    ui.separator();
+    icons::toggle(ui, &mut s.goal_on, "Daily goal");
+    let mut reset = false;
+    ui.add_enabled_ui(s.goal_on, |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Words per day").color(theme::muted()));
+            ui.add(egui::DragValue::new(&mut s.goal_words).range(50..=20_000).speed(10.0));
+        });
+        ui.add_space(6.0);
+        let frac = if s.goal_words > 0 { (stats.today as f32 / s.goal_words as f32).clamp(0.0, 1.0) } else { 0.0 };
+        let text = if frac >= 1.0 {
+            "Goal reached".to_string()
+        } else {
+            format!("{} to go", s.goal_words as i64 - stats.today)
+        };
+        ui.add(egui::ProgressBar::new(frac).desired_width(280.0).fill(theme::accent()));
+        ui.label(RichText::new(text).size(12.5).color(if frac >= 1.0 { theme::accent() } else { theme::muted() }));
+        ui.add_space(4.0);
+        if ui.add(egui::Button::new("Reset today").rounding(8.0)).on_hover_text("Start today's count from zero").clicked() {
+            reset = true;
+        }
+    });
+    reset
 }
 
 fn emoji_popup(ui: &mut egui::Ui) -> Option<&'static str> {

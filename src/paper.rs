@@ -100,6 +100,8 @@ pub struct View<'a> {
     pub selection: Option<(usize, usize)>,
     /// Read-back offset in lines.
     pub scroll: f32,
+    /// 0..1 warm glow at the type point when the writing goal is reached.
+    pub glow: f32,
 }
 
 /// Paper geometry from the last frame, for mouse hit testing.
@@ -236,6 +238,9 @@ pub fn draw(ui: &mut egui::Ui, v: &View, s: &Settings, strike: Option<Strike>) -
 
     if s.light_on {
         torch(&painter, rect, pos2(tip, platen_top), s.light_strength);
+    }
+    if v.glow > 0.0 {
+        goal_glow(&painter, pos2(tip, platen_top), v.glow);
     }
     if response.hovered() && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.y <= platen_top) {
         ctx.set_cursor_icon(egui::CursorIcon::Text);
@@ -451,6 +456,30 @@ fn ribbon_vibrator(p: &Painter, tip: f32, platen_top: f32, cw: f32, swing: f32) 
     let s = Stroke::new(1.5f32, Color32::from_rgb(150, 150, 160));
     p.line_segment([pos2(ribbon.left() - 2.0, ribbon.top() - 1.0), pos2(ribbon.left() - 2.0, ribbon.bottom() + 6.0)], s);
     p.line_segment([pos2(ribbon.right() + 2.0, ribbon.top() - 1.0), pos2(ribbon.right() + 2.0, ribbon.bottom() + 6.0)], s);
+}
+
+/// Soft gold halo around the type point, drawn as a radial mesh.
+fn goal_glow(painter: &Painter, center: Pos2, t: f32) {
+    const SEG: u32 = 96;
+    let radii = [0.0, 30.0, 70.0, 120.0, 180.0, 260.0];
+    let alpha = [0.34, 0.26, 0.15, 0.07, 0.02, 0.0];
+    let mut m = Mesh::default();
+    for (r, a) in radii.iter().zip(alpha) {
+        let c = Color32::from_rgba_unmultiplied(255, 196, 92, (a * t * 255.0) as u8);
+        for s in 0..SEG {
+            let ang = TAU * s as f32 / SEG as f32;
+            m.colored_vertex(center + vec2(ang.cos(), ang.sin()) * *r, c);
+        }
+    }
+    for ring in 0..radii.len() as u32 - 1 {
+        for s in 0..SEG {
+            let a = ring * SEG + s;
+            let b = ring * SEG + (s + 1) % SEG;
+            m.add_triangle(a, b, a + SEG);
+            m.add_triangle(b, b + SEG, a + SEG);
+        }
+    }
+    painter.add(m);
 }
 
 /// Dims everything except a small, subtle V-shaped beam rising from the

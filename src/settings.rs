@@ -145,6 +145,14 @@ pub struct Settings {
     pub auto_update_check: bool,
     /// Unix seconds of the last automatic update check.
     pub last_update_check: u64,
+    /// Ring the bell when today's words reach `goal_words`.
+    pub goal_on: bool,
+    pub goal_words: u32,
+    /// Net words typed on `goal_day` (local days since 1970).
+    pub words_today: i64,
+    pub goal_day: u32,
+    /// Last day the goal bell rang, so it rings once a day.
+    pub goal_hit_day: u32,
 }
 
 impl Default for Settings {
@@ -166,6 +174,11 @@ impl Default for Settings {
             sort_desc: true,
             auto_update_check: true,
             last_update_check: 0,
+            goal_on: false,
+            goal_words: 500,
+            words_today: 0,
+            goal_day: 0,
+            goal_hit_day: 0,
         }
     }
 }

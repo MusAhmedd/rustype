@@ -14,6 +14,8 @@ pub enum Effect {
     Space,
     Return,
     Bell,
+    /// Two-tone chime for reaching the daily writing goal.
+    Goal,
 }
 
 struct Rng(u32);
@@ -108,11 +110,27 @@ fn bell(partials: &[(f32, f32)], decay: f32, gain: f32) -> Vec<f32> {
         .collect()
 }
 
+/// Two bell strikes, the second a fifth higher, for the goal chime.
+fn chime(base_hz: f32) -> Vec<f32> {
+    let a = bell(&[(base_hz, 0.5), (base_hz * 2.76, 0.15)], 4.0, 0.3);
+    let b = bell(&[(base_hz * 1.5, 0.5), (base_hz * 4.14, 0.12)], 3.5, 0.3);
+    let offset = len(0.2);
+    let mut out = vec![0.0; offset + b.len()];
+    for (i, v) in a.iter().enumerate() {
+        out[i] += v;
+    }
+    for (i, v) in b.iter().enumerate() {
+        out[offset + i] += v;
+    }
+    out
+}
+
 struct Bank {
     keys: Vec<Vec<f32>>,
     space: Vec<f32>,
     ret: Vec<f32>,
     bell: Option<Vec<f32>>,
+    chime: Vec<f32>,
 }
 
 fn bank(pack: SoundPack) -> Bank {
@@ -153,7 +171,12 @@ fn bank(pack: SoundPack) -> Bank {
         ),
         SoundPack::Mechanical => (strike(0x7777, Strike { thump_hz: 120.0, ..base }, 1.0), None),
     };
-    Bank { keys, space, ret, bell }
+    let chime = chime(match pack {
+        SoundPack::Electric => 1320.0,
+        SoundPack::Vintage => 1760.0,
+        _ => 1568.0,
+    });
+    Bank { keys, space, ret, bell, chime }
 }
 
 pub struct Sound {
@@ -201,6 +224,7 @@ impl Sound {
                     self.emit(b, volume);
                 }
             }
+            Effect::Goal => self.emit(&self.bank.chime, volume),
         }
     }
 }
